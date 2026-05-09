@@ -1,122 +1,75 @@
 import scrapy
 import re
-import datetime
-
+from datetime import datetime
 
 
 class JobsSpider(scrapy.Spider):
     name = "jobs"
-
     base_url = "https://www.onlinejobs.ph"
     search_page = "/jobseekers/jobsearch"
 
-
-    # Keywords Interested In a Post Title
-    keywords = [
-        'automation',
-        'developer',
-        'programmer',
-        'blockchain',
-        'scraper',
-        'excel ',
-        'illustration',
-        'cartoon',
-        'artist',
-        'python',
-        'javascript',
-        'cypress',
-        'tester',
-        'game',
-        'robomotion'
+    search_terms = [
+        'n8n', 'zapier', 'make.com', 'automation engineer',
+        'automation specialist', 'workflow automation', 'rpa',
+        'power automate', 'no-code', 'webhook',
+        'python automation', 'api integration',
+        'web scraping', 'discord bot', 'chatbot developer',
     ]
-    search_keywords = '|'.join(keywords)
 
-    # Exclusions Not Interested In a Post Title
     exclusions = [
-        'virtual assistant',
-        'magento',
-        'social media',
-        'angular',
-        'php',
-        'female'
+        'senior', 'lead', 'magento', 'female',
+        'video editor', 'graphic designer', 'content creator',
+        'podcast', 'animator', 'social media', 'sales',
+        'accountant', 'bookkeeper', 'customer service'
     ]
-    search_exclusions = '|'.join(exclusions)
+    search_exclusions = '|'.join(re.escape(e) for e in exclusions)
 
-
-    # Element Selectors
     list_posts = "div.jobpost-cat-box"
-    post_date = "p em::text"
-    post_role = "h4::text"
-    post_client = "p::text"
-    post_salary = "dl.no-gutters dd::text"
-    post_desc = "div.desc::text"
-    post_url = "a"
+    job_title  = "h4::text"
+    job_link   = "a::attr(href)"
+    job_salary = "p.salary-value::text"
+    job_desc   = "div.desc::text"
 
+    max_pages = 3
 
+    custom_settings = {
+        'DOWNLOAD_DELAY': 0.3,
+        'RANDOMIZE_DOWNLOAD_DELAY': True,
+        'CONCURRENT_REQUESTS': 2,
+        'DUPEFILTER_CLASS': 'scrapy.dupefilters.RFPDupeFilter',
+    }
 
-
-    # Method to Clean Scraped Text
-    def clean(self, text):
-        text = text.encode("ascii", "ignore")
-        text = text.decode()
-        return text.replace("\n",'').replace("\r",' ').strip()
-
-
-
-
-
-    def __init__(self, offset='', **kwargs):
-
-        self.start_urls = []
-        self.offset = int(offset)
-
-        if self.offset < 2:
-            start = 0
-        else:
-            start = (self.offset * 25)
-        end = start + 25
-
-        # Generate Multiple Pages to Scrape
-        for i in range(start, end):
-            self.start_urls.append(''.join([self.base_url, self.search_page, '/', str(i * 30)]))
-        super().__init__(**kwargs)
-
-
+    def start_requests(self):
+        for term in self.search_terms:
+            url = f"{self.base_url}{self.search_page}?jobkeyword={term}"
+            yield scrapy.Request(url=url, callback=self.parse, meta={'term': term, 'page': 1})
 
     def parse(self, response):
-        today = datetime.date.today()
-        period = today - datetime.timedelta(self.offset)
+        term = response.meta.get('term')
+        page = response.meta.get('page', 1)
+        posts = response.css(self.list_posts)
 
-        jobs = response.css(self.list_posts)
+        for post in posts:
+            title  = post.css(self.job_title).get(default='').strip()
+            link   = post.css(self.job_link).get()
+            salary = post.css(self.job_salary).get(default='Negotiable').strip()
+            desc   = post.css(self.job_desc).get(default='').strip()
 
+            if not title or not link:
+                continue
+            if re.search(self.search_exclusions, title, re.IGNORECASE):
+                continue
 
-        for job in jobs:
-            # Only Scrape Posts that are for Today or Yesterday
-            date = job.css(self.post_date).get(default='')
-            if re.search(str(period.day) + ',', self.clean(date).lower()):
+            full_link = self.base_url + link if link.startswith('/') else link
+            yield {
+                'role':        title,
+                'title':       title,
+                'link':        full_link,
+                'salary':      salary,
+                'description': desc,
+                'scraped_at':  datetime.now().strftime("%Y-%m-%d")
+            }
 
-                # Scrape Desired Information
-                role = job.css(self.post_role).get(default='')
-                client = job.css(self.post_client).get(default='')
-                salary = job.css(self.post_salary).get(default='')
-                desc = job.css(self.post_desc).get(default='')
-                url = self.base_url + job.css(self.post_url)[0].attrib['href']
-
-                keywords_in_post = re.search(self.search_keywords, role.lower());
-                exclusions_in_post = re.search(self.search_exclusions, role.lower());
-
-                if keywords_in_post and not exclusions_in_post:
-                    yield {
-                        'role': self.clean(role),
-                        'client': self.clean(client),
-                        'salary': self.clean(salary),
-                        'desc': self.clean(desc),
-                        'date': date,
-                        'url': url,
-                    }
-
-
-
-
-# To run:
-# scrapy crawl jobs -o jobs.json
+        if posts and page < self.max_pages:
+            next_url = f"{self.base_url}{self.search_page}?jobkeyword={term}&page={page + 1}"
+            yield scrapy.Request(url=next_url, callback=self.parse, meta={'term': term, 'page': page + 1})
